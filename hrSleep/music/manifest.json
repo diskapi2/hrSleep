@@ -1,0 +1,23 @@
+[
+  {
+    "file": "canon_ground.mid",
+    "title": "Canon Ground",
+    "bpm": 60.0,
+    "beats_per_bar": 4,
+    "beats": 128
+  },
+  {
+    "file": "slow_waltz.mid",
+    "title": "Slow Waltz",
+    "bpm": 60.0,
+    "beats_per_bar": 3,
+    "beats": 108
+  },
+  {
+    "file": "pentatonic_drift.mid",
+    "title": "Pentatonic Drift",
+    "bpm": 60.0,
+    "beats_per_bar": 4,
+    "beats": 128
+  }
+]
