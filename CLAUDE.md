@@ -35,7 +35,10 @@ Example: X = 5, HR 70 → music at 65 bpm.
   link that is up but silent for 30 s; gattserverdisconnected then reconnects.
   On Android startNotifications() sometimes never resolves (seen with the Charge 6), so the
   first reading after it is called also counts as success; the pause after connect grows on
-  retries (0.6 s, then 2–3 s). A "Simulate" mode generates fake HR that drifts toward the music tempo, for
+  retries (0.6 s, then 2–3 s). It also hangs or fails with "NotSupportedError: GATT operation
+  failed for unknown reason" (seen on the Pixel, likely the Fitbit app syncing over the shared
+  link), so it is retried up to 3 times on the same link before a full reconnect. Choosing
+  the same device again keeps its link (disconnecting it used to kill the new attempt). A "Simulate" mode generates fake HR that drifts toward the music tempo, for
   testing without a device.
 - Control loop, once per second: EMA-smoothed HR (tau, default 20 s) → target = clamp(HR − X,
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for

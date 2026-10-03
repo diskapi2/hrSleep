@@ -306,21 +306,23 @@ async function connectBluetooth() {
     return;
   }
   stopSim();
-  dropDevice();
-  logEvent(`BLE device chosen: ${device.name || "?"} (id ${device.id})`);
+  const same = HR.device === device;   // chose the same watch again: keep its link
+  dropDevice(same);
+  logEvent(`BLE device chosen: ${device.name || "?"} (id ${device.id})${same ? " — same device, keeping the link" : ""}`);
   HR.device = device;
   device.addEventListener("gattserverdisconnected", onGattDisconnected);
   keepConnected(device, "Connecting to");
 }
 
-// Forget the current device and cancel any connect loop for it.
-function dropDevice() {
+// Forget the current device and cancel any connect loop for it. keepLink: don't disconnect
+// (the same device was chosen again; disconnecting would cut the new attempt's link).
+function dropDevice(keepLink) {
   const d = HR.device;
   if (!d) return;
   HR.device = null;
   bleSession++;
   d.removeEventListener("gattserverdisconnected", onGattDisconnected);
-  if (d.gatt.connected) d.gatt.disconnect();
+  if (!keepLink && d.gatt.connected) d.gatt.disconnect();
 }
 
 // Connect, retrying with backoff until it works or the device is dropped/replaced.
@@ -366,14 +368,26 @@ async function connectOnce(device, session, attempt) {
   const ch = await step("Finding heart rate data", svc.getCharacteristic("heart_rate_measurement"));
   ch.addEventListener("characteristicvaluechanged", onHrmChange);
   // On Android, startNotifications() sometimes never resolves although readings do arrive
-  // (or the watch still notifies from an earlier connection). The first reading counts as
-  // success too.
+  // (or the watch still notifies from an earlier connection), so the first reading counts
+  // as success too. It can also hang or fail while the phone's link to the watch is busy
+  // (e.g. the Fitbit app syncing), so retry it on the same link before reconnecting.
   const since = Date.now();
-  const firstReading = new Promise((resolve) => {
+  const firstReading = () => new Promise((resolve) => {
     const iv = setInterval(() => { if (HR.lastAt >= since || session !== bleSession) { clearInterval(iv); resolve("reading"); } }, 200);
     setTimeout(() => clearInterval(iv), BLE_STEP_MS + 1000);
   });
-  const how = await step("Starting heart rate updates", Promise.race([ch.startNotifications().then(() => "confirmed"), firstReading]));
+  let how = null;
+  for (let n = 1; !how; n++) {
+    try {
+      how = await step("Starting heart rate updates" + (n > 1 ? ` (try ${n})` : ""),
+        Promise.race([ch.startNotifications().then(() => "confirmed"), firstReading()]));
+    } catch (e) {
+      if (n >= 3 || !device.gatt.connected || session !== bleSession) throw e;
+      logEvent(`BLE ${errText(e)} — trying again on the same link`, "warn");
+      await sleep(1500);
+      t0 = Date.now();
+    }
+  }
   if (how === "reading") logEvent("BLE startNotifications not confirmed, but readings arrive — continuing", "warn");
   if (session !== bleSession) return;
   HR.source = "ble:" + name;
