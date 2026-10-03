@@ -271,6 +271,10 @@ function parseHrm(dv) {
 const BLE_STEP_MS = 10000;      // timeout per step (connect, discovery)
 const BLE_NOTIFY_MS = 6000;     // timeout for starting heart rate updates (works in < 0.5 s or never)
 const BLE_SILENT_MS = 30000;    // connected but no heart rate this long: reconnect
+// When the watch's heart rate sharing gets stuck, only toggling it on the watch helps
+// (Charge 6: turning "HR on equipment" off and on connected immediately).
+const BLE_TIP_AFTER = 2;
+const BLE_TIP = " · Tip: on the watch, turn heart rate sharing (HR on equipment) off and on";
 let bleSession = 0;             // bumped to cancel a running connect loop
 let bleBusy = 0;                // session number of the running connect loop, 0 if none
 
@@ -337,7 +341,8 @@ async function keepConnected(device, label) {
   bleBusy = session;
   try {
     for (let attempt = 1; HR.device === device && session === bleSession; attempt++) {
-      setHrStatus(`${label} ${name}…` + (attempt > 1 ? ` (attempt ${attempt})` : ""), attempt > 1 ? "stale" : "");
+      setHrStatus(`${label} ${name}…` + (attempt > 1 ? ` (attempt ${attempt})` : "") + (attempt > BLE_TIP_AFTER ? BLE_TIP : ""),
+        attempt > 1 ? "stale" : "");
       try {
         await connectOnce(device, session, attempt);
         if (session === bleSession) logEvent(`BLE connected after ${attempt} attempt${attempt > 1 ? "s" : ""} (${Math.round((Date.now() - started) / 1000)} s)`);
@@ -346,7 +351,8 @@ async function keepConnected(device, label) {
         if (session !== bleSession) return;
         logEvent(`BLE attempt ${attempt} failed: ${errText(e)} (link ${device.gatt.connected ? "up" : "down"})`, "error");
         if (device.gatt.connected) device.gatt.disconnect();   // reset a half-open link
-        setHrStatus(`${e.message} — retrying…`, "stale");
+        if (attempt === BLE_TIP_AFTER) logEvent("BLE still failing — showing the tip to toggle HR sharing on the watch", "warn");
+        setHrStatus(`${e.message} — retrying…` + (attempt >= BLE_TIP_AFTER ? BLE_TIP : ""), "stale");
         // A fresh connection is what succeeds, so retry quickly; slow down after many tries.
         await sleep(attempt < 15 ? 1500 : 5000);
       }

@@ -41,6 +41,9 @@ Example: X = 5, HR 70 → music at 65 bpm.
   (5 s after 15 attempts). A reading that arrives without the promise resolving counts as
   success. Choosing the same device again disconnects it and waits 1.5 s before connecting
   (an immediate connect got cut by the pending disconnect).
+  Root cause is on the watch: turning the Charge 6's "HR on equipment" (heart rate sharing)
+  off and on made it connect immediately. After 2 failed attempts the status line shows
+  that tip (BLE_TIP_AFTER / BLE_TIP).
   testing without a device.
 - Control loop, once per second: EMA-smoothed HR (tau, default 20 s) → target = clamp(HR − X,
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for
