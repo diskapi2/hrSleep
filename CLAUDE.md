@@ -7,9 +7,16 @@ Repo: github.com/diskapi2/hrSleep (this repo contains only hrSleep).
   - index.html: single-file web app (no build step). It is published on GitHub Pages at
     https://diskapi2.github.io/hrSleep/hrSleep/ and used in Chrome on a Pixel 8 Pro.
   - music/*.mid + music/manifest.json: generated MIDI pieces, steady 60 bpm,
-    quarter note = 1 beat, loopable (canon_ground 4/4, slow_waltz 3/4, pentatonic_drift 4/4).
-  - genMidi.py: generates the MIDI files with no dependencies (has its own SMF writer).
-    Args: --bpm, --seed, --out. It rewrites manifest.json, which index.html reads.
+    quarter note = 1 beat, loopable (canon_ground 4/4, slow_waltz 3/4, pentatonic_drift 4/4,
+    moonlight 4/4).
+  - genMidi.py: generates the MIDI files with no dependencies (has its own SMF writer and a
+    minimal Humdrum **kern reader). Args: --bpm, --seed, --out. It rewrites manifest.json,
+    which index.html reads. Existing files regenerate byte-identically (seed = --seed + index),
+    so append new pieces at the end of PIECES.
+  - scores/*.krn: public-domain pieces in Humdrum **kern format, read by genMidi.py.
+    moonlight_1.krn = Beethoven Sonata no. 14 mvt 1, from github.com/craigsapp/beethoven-piano-sonatas
+    (same repo has all 32 sonatas). Cut time is written as 4/4 so one beat = one triplet
+    group; the score's tempo is quarter = 108, so at heart rate it plays at about half speed.
 
 ## hrSleep concept
 Play soothing music. Read live heart rate from a Bluetooth device (Fitbit Charge 6 via its

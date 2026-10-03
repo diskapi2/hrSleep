@@ -12,7 +12,9 @@ import argparse
 import json
 import os
 import random
+import re
 import struct
+from fractions import Fraction
 
 PPQ = 480  # ticks per quarter note (= one beat)
 
@@ -95,7 +97,109 @@ def write_midi(path, title, bpm, beats_per_bar, total_beats, tracks):
 
 
 # ----------------------------------------------------------------------------
-# Pieces (all original arrangements; quarter note = one beat)
+# Minimal Humdrum **kern reader (for public-domain scores in scores/)
+# ----------------------------------------------------------------------------
+KERN_STEP = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
+
+
+def kern_pitch(tok):
+    """MIDI pitch of a kern note token: c = C4 (60), cc = C5, C = C3, CC = C2."""
+    m = re.search(r"([A-Ga-g])\1*", tok)
+    letters = m.group(0)
+    octave = 3 + len(letters) if letters[0].islower() else 4 - len(letters)
+    pitch = 12 * (octave + 1) + KERN_STEP[letters[0].lower()]
+    for ch in tok[m.end():]:
+        if ch == "#":
+            pitch += 1
+        elif ch == "-":
+            pitch -= 1
+        else:
+            break
+    return pitch
+
+
+def kern_dur(tok):
+    """Duration in quarter-note beats: 4 = quarter, 12 = triplet eighth, dots add halves."""
+    m = re.search(r"(\d+)(\.*)", tok)
+    d = add = Fraction(4, int(m.group(1)))
+    for _ in m.group(2):
+        add /= 2
+        d += add
+    return d
+
+
+def read_kern(path):
+    """Return (notes, total_beats) from a **kern file.
+
+    notes: (start, dur, pitch, spine) with times in beats as Fractions; spine is the
+    original column (0 = first **kern spine). Ties are merged; rests, grace notes and
+    non-kern spines (e.g. **dynam) are skipped. Handles spine splits (*^) and merges (*v).
+    """
+    spines, ends, kinds = [], [], []   # per current column: source spine, end time
+    notes, ties = [], {}
+    t = Fraction(0)
+    with open(path, encoding="utf-8") as f:
+        lines = [ln.rstrip("\r\n") for ln in f]
+    for ln in lines:
+        if not ln or ln.startswith("!") or ln.startswith("="):
+            continue
+        cols = ln.split("\t")
+        if ln.startswith("**"):
+            kinds = cols
+            spines = list(range(len(cols)))
+            ends = [t] * len(cols)
+            continue
+        if ln.startswith("*"):
+            new_sp, new_end, i = [], [], 0
+            while i < len(cols):
+                if cols[i] == "*^":
+                    new_sp += [spines[i]] * 2
+                    new_end += [ends[i]] * 2
+                    i += 1
+                elif cols[i] == "*v":
+                    j = i
+                    while j < len(cols) and cols[j] == "*v":
+                        j += 1
+                    new_sp.append(spines[i])
+                    new_end.append(max(ends[i:j]))
+                    i = j
+                else:
+                    new_sp.append(spines[i])
+                    new_end.append(ends[i])
+                    i += 1
+            spines, ends = new_sp, new_end
+            continue
+        music = [k for k in range(len(cols)) if kinds[spines[k]] == "**kern"]
+        if all(cols[k] == "." for k in music):
+            continue  # e.g. a dynamics-only line: no time passes
+        for k in music:
+            if cols[k] == ".":
+                continue
+            sp = spines[k]
+            for tok in cols[k].split(" "):
+                if "q" in tok or not re.search(r"\d", tok):
+                    continue  # grace note or null
+                d = kern_dur(tok)
+                ends[k] = t + d
+                if "r" in tok:
+                    continue
+                p = kern_pitch(tok)
+                if ("]" in tok or "_" in tok) and (sp, p) in ties:
+                    i = ties[(sp, p)]
+                    s0, d0, _, _ = notes[i]
+                    notes[i] = (s0, d0 + d, p, sp)
+                    if "]" in tok:
+                        del ties[(sp, p)]
+                    continue
+                notes.append((t, d, p, sp))
+                if "[" in tok:
+                    ties[(sp, p)] = len(notes) - 1
+        t = min(ends[k] for k in music if ends[k] > t)
+    return notes, t
+
+
+# ----------------------------------------------------------------------------
+# Pieces (original arrangements unless noted; quarter note = one beat)
 # ----------------------------------------------------------------------------
 def human(rng, vel, spread=4):
     return vel + rng.randint(-spread, spread)
@@ -206,10 +310,42 @@ def piece_pentatonic(rng):
     return dict(title="Pentatonic Drift", beats_per_bar=4, total_beats=bars * 4, tracks=[pad, harp])
 
 
+def piece_moonlight(rng):
+    """Beethoven, Piano Sonata no. 14 'Moonlight', 1st movement (public domain), 69 bars.
+
+    Notes come from scores/moonlight_1.krn (Craig Stuart Sapp's Humdrum edition after
+    the Durand 1915 edition). Cut time is written as 4/4 here so that one beat is one
+    group of triplets; the score's tempo (half = 54) is quarter = 108, so playing it at
+    heart rate is about half speed. Damper pedal is approximated by letting the triplets
+    ring for one beat.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    notes, total = read_kern(os.path.join(here, "scores", "moonlight_1.krn"))
+    third = Fraction(1, 3)
+
+    bass = Track("Piano LH", channel=0, program=0, volume=95)
+    arp = Track("Piano triplets", channel=1, program=0, volume=90)
+    mel = Track("Piano melody", channel=2, program=0, volume=105)
+
+    melody_at = {(s, p) for s, d, p, sp in notes if d != third}
+    for start, dur, pitch, spine in notes:
+        if dur == third:
+            if (start, pitch) in melody_at:
+                continue  # melody note doubles the triplet: strike it once
+            arp.note(float(start), 1.0, pitch, human(rng, 36, 3))
+        elif spine == 1 or dur < 1:   # right hand, or dotted melody in the left hand
+            mel.note(float(start), float(dur), pitch, human(rng, 58, 3))
+        else:
+            bass.note(float(start), float(dur), pitch, human(rng, 46, 3))
+    return dict(title="Moonlight Sonata", beats_per_bar=4, total_beats=int(total),
+                tracks=[bass, arp, mel])
+
+
 PIECES = {
     "canon_ground": piece_canon,
     "slow_waltz": piece_gymno,
     "pentatonic_drift": piece_pentatonic,
+    "moonlight": piece_moonlight,
 }
 
 

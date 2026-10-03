@@ -19,5 +19,12 @@
     "bpm": 60.0,
     "beats_per_bar": 4,
     "beats": 128
+  },
+  {
+    "file": "moonlight.mid",
+    "title": "Moonlight Sonata",
+    "bpm": 60.0,
+    "beats_per_bar": 4,
+    "beats": 276
   }
 ]
