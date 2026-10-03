@@ -26,8 +26,13 @@ Example: X = 5, HR 70 → music at 65 bpm.
 
 ## How index.html works
 - Heart rate input: Web Bluetooth, standard Heart Rate service 0x180D / heart_rate_measurement.
-  Parses 8/16-bit HR and RR intervals (1/1024 s units), auto-reconnects, reads battery_service
-  if present. A "Simulate" mode generates fake HR that drifts toward the music tempo, for
+  Parses 8/16-bit HR and RR intervals (1/1024 s units), reads battery_service if present.
+  Connecting (keepConnected/connectOnce): every step (gatt.connect, service/characteristic
+  discovery, startNotifications) has a 10 s timeout — on Android gatt.connect() can hang
+  forever — with a 0.6 s pause after connect, retries with backoff, one loop at a time
+  (bleSession cancels, bleBusy marks a running loop), and a single shared notification
+  listener so reconnects never double the readings. A watchdog in the 1 Hz loop resets a
+  link that is up but silent for 30 s; gattserverdisconnected then reconnects. A "Simulate" mode generates fake HR that drifts toward the music tempo, for
   testing without a device.
 - Control loop, once per second: EMA-smoothed HR (tau, default 20 s) → target = clamp(HR − X,
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for

@@ -201,7 +201,7 @@ for (const key of Object.keys(FORMAT)) {
 // ---------------------------------------------------------------------------
 // Heart rate state
 // ---------------------------------------------------------------------------
-const HR = { source: null, last: null, lastAt: 0, smooth: null, rrPending: [], device: null, battery: null };
+const HR = { source: null, last: null, lastAt: 0, smooth: null, rrPending: [], device: null, battery: null, connectedAt: 0 };
 const STALE_MS = 10000;
 
 function onHeartRate(bpm, rrMs) {
@@ -232,61 +232,123 @@ function parseHrm(dv) {
   return { bpm, rr };
 }
 
+// Each step of connecting gets a timeout (on Android, gatt.connect() can hang forever),
+// failures retry with backoff, and only one connect loop runs at a time.
+const BLE_STEP_MS = 10000;      // timeout per step (connect, discovery, notifications)
+const BLE_SILENT_MS = 30000;    // connected but no heart rate this long: reconnect
+let bleSession = 0;             // bumped to cancel a running connect loop
+let bleBusy = 0;                // session number of the running connect loop, 0 if none
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function withTimeout(promise, ms, what) {
+  let timer;
+  const t = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(what + " timed out")), ms); });
+  return Promise.race([promise, t]).finally(() => clearTimeout(timer));
+}
+
+function onHrmChange(ev) {        // one shared listener, so reconnects never add duplicates
+  const m = parseHrm(ev.target.value);
+  onHeartRate(m.bpm, m.rr);
+}
+function onGattDisconnected(ev) {
+  if (ev.target === HR.device && !bleBusy) keepConnected(ev.target, "Disconnected — reconnecting to");
+}
+
 async function connectBluetooth() {
   if (!navigator.bluetooth) {
     alert("Web Bluetooth is not available. Use Chrome on Android or desktop, over https:// or localhost.");
     return;
   }
+  let device;
   try {
-    const device = await navigator.bluetooth.requestDevice({
+    device = await navigator.bluetooth.requestDevice({
       filters: [{ services: ["heart_rate"] }],
       optionalServices: ["battery_service"],
     });
-    stopSim();
-    HR.device = device;
-    device.addEventListener("gattserverdisconnected", () => reconnect(device));
-    await startNotifications(device);
   } catch (e) {
     if (e.name !== "NotFoundError") setHrStatus("Bluetooth error: " + e.message, "stale");
+    return;
+  }
+  stopSim();
+  dropDevice();
+  HR.device = device;
+  device.addEventListener("gattserverdisconnected", onGattDisconnected);
+  keepConnected(device, "Connecting to");
+}
+
+// Forget the current device and cancel any connect loop for it.
+function dropDevice() {
+  const d = HR.device;
+  if (!d) return;
+  HR.device = null;
+  bleSession++;
+  d.removeEventListener("gattserverdisconnected", onGattDisconnected);
+  if (d.gatt.connected) d.gatt.disconnect();
+}
+
+// Connect, retrying with backoff until it works or the device is dropped/replaced.
+async function keepConnected(device, label) {
+  const session = ++bleSession;
+  const name = device.name || "device";
+  bleBusy = session;
+  try {
+    for (let attempt = 1; HR.device === device && session === bleSession; attempt++) {
+      setHrStatus(`${label} ${name}…` + (attempt > 1 ? ` (attempt ${attempt})` : ""), attempt > 1 ? "stale" : "");
+      try {
+        await connectOnce(device, session);
+        return;
+      } catch (e) {
+        if (session !== bleSession) return;
+        console.warn("BLE attempt", attempt, e);
+        if (device.gatt.connected) device.gatt.disconnect();   // reset a half-open link
+        setHrStatus(`${e.message} — retrying…`, "stale");
+        await sleep(Math.min(15000, 1000 * attempt));
+      }
+    }
+  } finally {
+    if (bleBusy === session) bleBusy = 0;
   }
 }
 
-async function startNotifications(device) {
-  setHrStatus("Connecting to " + (device.name || "device") + "…");
-  const server = await device.gatt.connect();
-  const svc = await server.getPrimaryService("heart_rate");
-  const ch = await svc.getCharacteristic("heart_rate_measurement");
-  ch.addEventListener("characteristicvaluechanged", (ev) => {
-    const m = parseHrm(ev.target.value);
-    onHeartRate(m.bpm, m.rr);
-  });
-  await ch.startNotifications();
-  HR.source = "ble:" + (device.name || "device");
-  setHrStatus("Connected: " + (device.name || "device"), "on");
+async function connectOnce(device, session) {
+  const name = device.name || "device";
+  const server = await withTimeout(device.gatt.connect(), BLE_STEP_MS, "Connecting");
+  await sleep(600);   // Android: discovering services right after connecting often fails
+  if (session !== bleSession) return;
+  const svc = await withTimeout(server.getPrimaryService("heart_rate"), BLE_STEP_MS, "Finding heart rate service");
+  const ch = await withTimeout(svc.getCharacteristic("heart_rate_measurement"), BLE_STEP_MS, "Finding heart rate data");
+  ch.addEventListener("characteristicvaluechanged", onHrmChange);
+  await withTimeout(ch.startNotifications(), BLE_STEP_MS, "Starting heart rate updates");
+  if (session !== bleSession) return;
+  HR.source = "ble:" + name;
+  HR.connectedAt = Date.now();
+  setHrStatus("Connected: " + name, "on");
   readBattery(server);
+}
+
+// Called from the 1 Hz loop: a link that is up but silent gets reset (the
+// gattserverdisconnected handler then reconnects).
+function bleWatchdog(now) {
+  const d = HR.device;
+  if (!d || bleBusy || !d.gatt.connected) return;
+  if (now - Math.max(HR.lastAt, HR.connectedAt || 0) > BLE_SILENT_MS) {
+    HR.connectedAt = now;
+    d.gatt.disconnect();
+  }
 }
 
 async function readBattery(server) {
   try {
-    const svc = await server.getPrimaryService("battery_service");
+    const svc = await withTimeout(server.getPrimaryService("battery_service"), BLE_STEP_MS, "battery");
     const ch = await svc.getCharacteristic("battery_level");
     HR.battery = (await ch.readValue()).getUint8(0);
   } catch (e) { HR.battery = null; }
 }
 
-async function reconnect(device) {
-  if (HR.device !== device) return;      // user switched source
-  setHrStatus("Disconnected — reconnecting…", "stale");
-  for (let attempt = 0; HR.device === device; attempt++) {
-    try { await startNotifications(device); return; }
-    catch (e) { await new Promise(r => setTimeout(r, Math.min(30000, 2000 * (attempt + 1)))); }
-  }
-}
-
 // --- Simulator ---
 let simTimer = null, simHr = null;
 function startSim() {
-  if (HR.device) { const d = HR.device; HR.device = null; if (d.gatt.connected) d.gatt.disconnect(); }
+  dropDevice();
   HR.source = "sim";
   simHr = S.simHr;
   $("simPanel").hidden = false;
@@ -515,9 +577,11 @@ let snapTempo = false;   // jump straight to the first target after Play when no
 setInterval(() => {
   const now = Date.now();
   const fresh = HR.lastAt && now - HR.lastAt < STALE_MS;
+  bleWatchdog(now);
   target = fresh && HR.smooth != null ? clampBpm(HR.smooth - S.offset) : null;
 
-  if (HR.source && HR.lastAt && !fresh) setHrStatus("No data for " + Math.round((now - HR.lastAt) / 1000) + " s — holding tempo", "stale");
+  if (bleBusy) { /* the connect loop shows its own status */ }
+  else if (HR.source && HR.lastAt && !fresh) setHrStatus("No data for " + Math.round((now - HR.lastAt) / 1000) + " s — holding tempo", "stale");
   else if (HR.source && fresh && $("hrStatus").classList.contains("stale") && HR.source !== "sim")
     setHrStatus("Connected: " + HR.source.slice(4), "on");
 
