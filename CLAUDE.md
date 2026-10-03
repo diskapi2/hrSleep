@@ -32,7 +32,10 @@ Example: X = 5, HR 70 → music at 65 bpm.
   forever — with a 0.6 s pause after connect, retries with backoff, one loop at a time
   (bleSession cancels, bleBusy marks a running loop), and a single shared notification
   listener so reconnects never double the readings. A watchdog in the 1 Hz loop resets a
-  link that is up but silent for 30 s; gattserverdisconnected then reconnects. A "Simulate" mode generates fake HR that drifts toward the music tempo, for
+  link that is up but silent for 30 s; gattserverdisconnected then reconnects.
+  On Android startNotifications() sometimes never resolves (seen with the Charge 6), so the
+  first reading after it is called also counts as success; the pause after connect grows on
+  retries (0.6 s, then 2–3 s). A "Simulate" mode generates fake HR that drifts toward the music tempo, for
   testing without a device.
 - Control loop, once per second: EMA-smoothed HR (tau, default 20 s) → target = clamp(HR − X,
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for
@@ -53,6 +56,9 @@ Example: X = 5, HR 70 → music at 65 bpm.
   libraries and the 18 Salamander samples. Own files are network-first (3 s timeout, then
   cache), so pushed updates still arrive; CDN/samples are cache-first. Bump CACHE in sw.js
   only to force a full re-download (e.g. after changing the sample list).
+- Event/error log ("Show error log" button): logEvent() keeps the last 500 entries in
+  localStorage (hrSleep.events) — every BLE step with timing, failures, disconnects, watchdog
+  resets, window errors/unhandled rejections and console.warn/error. Copy button for sending.
 - Log: 1 row/s, kept in localStorage in chunks of 300 rows (keys hrSleep.log.0..n-1 and
   hrSleep.log.chunks; only unsaved chunks are rewritten, every 30 s and on pagehide; an old
   single-key hrSleep.log is migrated on load). The chart draws only when visible, binary-

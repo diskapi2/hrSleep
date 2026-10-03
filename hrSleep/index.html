@@ -60,6 +60,8 @@
   .setting output { font-variant-numeric: tabular-nums; color: var(--accent); min-width: 64px; text-align: right; }
   .setting input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
   .hint { font-size: 12px; color: var(--muted); grid-column: 1 / -1; }
+  #eventsPanel pre { margin: 10px 0 0; max-height: 50vh; overflow: auto; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; color: var(--text); }
   details summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
 
   #dim { position: fixed; inset: 0; background: #000; display: none; align-items: center; justify-content: center;
@@ -164,6 +166,17 @@
       <button id="btnClear">Clear log</button>
     </div>
     <div class="row"><div id="logStatus" class="status"></div></div>
+    <div class="row"><button id="btnEvents" class="grow">Show error log</button></div>
+  </section>
+
+  <!-- Event / error log (connection steps, errors), for troubleshooting -->
+  <section class="panel" id="eventsPanel" hidden>
+    <div class="row">
+      <button id="btnEventsCopy" class="grow">Copy</button>
+      <button id="btnEventsClear">Clear</button>
+      <button id="btnEventsClose">Close</button>
+    </div>
+    <pre id="eventsText"></pre>
   </section>
 </main>
 
@@ -172,6 +185,27 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// Event log: connection steps and errors, kept in localStorage for troubleshooting
+// ---------------------------------------------------------------------------
+const EVENTS_KEY = "hrSleep.events", EVENTS_MAX = 500;
+let events = [];
+try { events = JSON.parse(localStorage.getItem(EVENTS_KEY)) || []; } catch (e) { events = []; }
+function logEvent(msg, level) {
+  events.push({ t: Date.now(), level: level || "info", msg: String(msg) });
+  if (events.length > EVENTS_MAX) events.splice(0, events.length - EVENTS_MAX);
+  try { localStorage.setItem(EVENTS_KEY, JSON.stringify(events)); } catch (e) { /* storage full */ }
+  if (typeof showEvents === "function" && !$("eventsPanel").hidden) showEvents();
+}
+function errText(e) { return e && e.name && e.message ? `${e.name}: ${e.message}` : String(e && e.message || e); }
+window.addEventListener("error", (ev) => logEvent(`${ev.message} (${(ev.filename || "").split("/").pop()}:${ev.lineno})`, "error"));
+window.addEventListener("unhandledrejection", (ev) => logEvent("Unhandled: " + errText(ev.reason), "error"));
+for (const level of ["warn", "error"]) {
+  const orig = console[level].bind(console);
+  console[level] = (...args) => { orig(...args); logEvent(args.map(a => a instanceof Error ? errText(a) : typeof a === "object" ? JSON.stringify(a) : a).join(" "), level); };
+}
+logEvent("App loaded · " + navigator.userAgent);
 
 // ---------------------------------------------------------------------------
 // Settings (persisted per browser)
@@ -251,6 +285,7 @@ function onHrmChange(ev) {        // one shared listener, so reconnects never ad
   onHeartRate(m.bpm, m.rr);
 }
 function onGattDisconnected(ev) {
+  logEvent("BLE disconnected" + (ev.target === HR.device ? "" : " (old device)"), "warn");
   if (ev.target === HR.device && !bleBusy) keepConnected(ev.target, "Disconnected — reconnecting to");
 }
 
@@ -266,11 +301,13 @@ async function connectBluetooth() {
       optionalServices: ["battery_service"],
     });
   } catch (e) {
-    if (e.name !== "NotFoundError") setHrStatus("Bluetooth error: " + e.message, "stale");
+    if (e.name !== "NotFoundError") { setHrStatus("Bluetooth error: " + e.message, "stale"); logEvent("BLE chooser: " + errText(e), "error"); }
+    else logEvent("BLE chooser closed without a device");
     return;
   }
   stopSim();
   dropDevice();
+  logEvent(`BLE device chosen: ${device.name || "?"} (id ${device.id})`);
   HR.device = device;
   device.addEventListener("gattserverdisconnected", onGattDisconnected);
   keepConnected(device, "Connecting to");
@@ -295,11 +332,11 @@ async function keepConnected(device, label) {
     for (let attempt = 1; HR.device === device && session === bleSession; attempt++) {
       setHrStatus(`${label} ${name}…` + (attempt > 1 ? ` (attempt ${attempt})` : ""), attempt > 1 ? "stale" : "");
       try {
-        await connectOnce(device, session);
+        await connectOnce(device, session, attempt);
         return;
       } catch (e) {
         if (session !== bleSession) return;
-        console.warn("BLE attempt", attempt, e);
+        logEvent(`BLE attempt ${attempt} failed: ${errText(e)} (link ${device.gatt.connected ? "up" : "down"})`, "error");
         if (device.gatt.connected) device.gatt.disconnect();   // reset a half-open link
         setHrStatus(`${e.message} — retrying…`, "stale");
         await sleep(Math.min(15000, 1000 * attempt));
@@ -310,19 +347,39 @@ async function keepConnected(device, label) {
   }
 }
 
-async function connectOnce(device, session) {
+async function connectOnce(device, session, attempt) {
   const name = device.name || "device";
-  const server = await withTimeout(device.gatt.connect(), BLE_STEP_MS, "Connecting");
-  await sleep(600);   // Android: discovering services right after connecting often fails
+  let t0 = Date.now();
+  const step = async (what, promise) => {
+    logEvent(`BLE ${what}…`);
+    const r = await withTimeout(promise, BLE_STEP_MS, what);
+    logEvent(`BLE ${what} ok (${Date.now() - t0} ms)`);
+    t0 = Date.now();
+    return r;
+  };
+  logEvent(`BLE attempt ${attempt} to ${name} (link ${device.gatt.connected ? "already up" : "down"})`);
+  const server = await step("Connecting", device.gatt.connect());
+  // Android: discovering services right after connecting often fails; wait longer on retries
+  await sleep(attempt === 1 ? 600 : Math.min(3000, 1000 * attempt));
   if (session !== bleSession) return;
-  const svc = await withTimeout(server.getPrimaryService("heart_rate"), BLE_STEP_MS, "Finding heart rate service");
-  const ch = await withTimeout(svc.getCharacteristic("heart_rate_measurement"), BLE_STEP_MS, "Finding heart rate data");
+  const svc = await step("Finding heart rate service", server.getPrimaryService("heart_rate"));
+  const ch = await step("Finding heart rate data", svc.getCharacteristic("heart_rate_measurement"));
   ch.addEventListener("characteristicvaluechanged", onHrmChange);
-  await withTimeout(ch.startNotifications(), BLE_STEP_MS, "Starting heart rate updates");
+  // On Android, startNotifications() sometimes never resolves although readings do arrive
+  // (or the watch still notifies from an earlier connection). The first reading counts as
+  // success too.
+  const since = Date.now();
+  const firstReading = new Promise((resolve) => {
+    const iv = setInterval(() => { if (HR.lastAt >= since || session !== bleSession) { clearInterval(iv); resolve("reading"); } }, 200);
+    setTimeout(() => clearInterval(iv), BLE_STEP_MS + 1000);
+  });
+  const how = await step("Starting heart rate updates", Promise.race([ch.startNotifications().then(() => "confirmed"), firstReading]));
+  if (how === "reading") logEvent("BLE startNotifications not confirmed, but readings arrive — continuing", "warn");
   if (session !== bleSession) return;
   HR.source = "ble:" + name;
   HR.connectedAt = Date.now();
   setHrStatus("Connected: " + name, "on");
+  logEvent("BLE connected: " + name);
   readBattery(server);
 }
 
@@ -332,6 +389,7 @@ function bleWatchdog(now) {
   const d = HR.device;
   if (!d || bleBusy || !d.gatt.connected) return;
   if (now - Math.max(HR.lastAt, HR.connectedAt || 0) > BLE_SILENT_MS) {
+    logEvent(`BLE no heart rate for ${BLE_SILENT_MS / 1000} s — resetting the link`, "warn");
     HR.connectedAt = now;
     d.gatt.disconnect();
   }
@@ -392,6 +450,7 @@ async function loadManifest() {
   try {
     manifest = await (await fetch("music/manifest.json", { cache: "no-cache" })).json();
   } catch (e) {
+    logEvent("Could not load music/manifest.json: " + errText(e), "error");
     $("playStatus").textContent = "Could not load music/manifest.json — serve this folder over http(s), not file://";
     return;
   }
@@ -427,6 +486,7 @@ async function initAudio() {
   }).connect(reverb);
   try { await Tone.loaded(); }
   catch (e) {  // offline: fall back to a soft synth for the piano parts
+    logEvent("Piano samples failed to load, using a synth: " + errText(e), "warn");
     piano = new Tone.PolySynth(Tone.Synth, { envelope: { attack: 0.01, decay: 1.2, sustain: 0.2, release: 1.5 }, volume: -10 }).connect(reverb);
   }
 }
@@ -672,6 +732,23 @@ window.addEventListener("resize", drawChart);
 // --- Dim screen (keeps the page alive for audio + Bluetooth) ---
 $("btnDim").onclick = () => $("dim").classList.add("show");
 $("dim").ondblclick = () => { $("dim").classList.remove("show"); drawChart(); };
+
+// --- Event / error log panel ---
+function showEvents() {
+  const fmt = (t) => { const d = new Date(t); return d.toLocaleDateString([], { month: "2-digit", day: "2-digit" }) + " " + d.toLocaleTimeString([], { hour12: false }); };
+  $("eventsText").textContent = events.length
+    ? events.slice().reverse().map(e => `${fmt(e.t)} ${e.level === "info" ? "" : e.level.toUpperCase() + " "}${e.msg}`).join("\n")
+    : "No events yet.";
+}
+$("btnEvents").onclick = () => { $("eventsPanel").hidden = false; showEvents(); $("eventsPanel").scrollIntoView({ behavior: "smooth" }); };
+$("btnEventsClose").onclick = () => { $("eventsPanel").hidden = true; };
+$("btnEventsClear").onclick = () => { events = []; try { localStorage.removeItem(EVENTS_KEY); } catch (e) { /* ignore */ } showEvents(); };
+$("btnEventsCopy").onclick = async () => {
+  const text = $("eventsText").textContent;
+  try { await navigator.clipboard.writeText(text); $("btnEventsCopy").textContent = "Copied"; }
+  catch (e) { const r = document.createRange(); r.selectNodeContents($("eventsText")); getSelection().removeAllRanges(); getSelection().addRange(r); $("btnEventsCopy").textContent = "Selected — copy it"; }
+  setTimeout(() => { $("btnEventsCopy").textContent = "Copy"; }, 2000);
+};
 
 // --- CSV log ---
 $("btnCsv").onclick = () => {
