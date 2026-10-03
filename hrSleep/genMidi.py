@@ -341,11 +341,85 @@ def piece_moonlight(rng):
                 tracks=[bass, arp, mel])
 
 
+def piece_brahms(rng):
+    """Brahms, Wiegenlied op. 49 no. 4 (public domain), 3/4 in F major, 4 verses + intro.
+
+    A gentle arrangement for babies: rocking waltz accompaniment (bass, then two soft
+    chords), melody on the piano; verse 2 adds a music-box octave above and a soft pad,
+    verse 4 is the quietest.
+    """
+    # melody per bar as (pitch, beats); the two pickup eighths (A4 A4) end the bar before
+    mel_bars = [
+        [(72, 1.5), (69, .5), (69, 1)],         # Lul-la-by and good
+        [(72, 2), (69, .5), (72, .5)],          # night, with ro-
+        [(77, 1), (76, 1.5), (74, .5)],         # ses be-dight, with
+        [(74, 1), (72, 1), (67, .5), (69, .5)],
+        [(70, 1), (67, 1), (67, .5), (69, .5)],
+        [(70, 2), (67, .5), (70, .5)],
+        [(76, .5), (74, .5), (72, 1), (76, 1)],
+        [(77, 2), (65, .5), (65, .5)],
+        [(77, 2), (74, .5), (70, .5)],
+        [(72, 2), (69, .5), (65, .5)],
+        [(70, 1), (72, 1), (74, 1)],
+        [(72, 2), (65, .5), (65, .5)],
+        [(77, 2), (74, .5), (70, .5)],
+        [(72, 2), (69, .5), (65, .5)],
+        [(70, 1), (69, 1), (67, 1)],
+        [(65, 2)],                              # + pickup into the next verse
+    ]
+    pickup = [(69, .5), (69, .5)]
+    F, C7, Bb = (41, [53, 57, 60]), (48, [52, 55, 58]), (46, [53, 58, 62])
+    harmony = [F, F, C7, C7, C7, C7, C7, F, Bb, F, Bb, F, Bb, F, C7, F]
+
+    lh = Track("Piano LH", channel=0, program=0, volume=85)
+    rh = Track("Piano melody", channel=1, program=0, volume=100)
+    box = Track("Music box", channel=2, program=0, volume=70)
+    pad = Track("Pad", channel=3, program=89, volume=60)
+
+    def accomp(bar, chord, soft):
+        t = bar * 3
+        bass, tones = chord
+        lh.note(t, 3, bass, human(rng, 44 - soft, 2))
+        for beat in (1, 2):
+            for n in tones:
+                lh.note(t + beat, 1, n, human(rng, 30 - soft, 2))
+
+    def melody(t, notes, soft, octave_box):
+        for pitch, d in notes:
+            rh.note(t, d, pitch, human(rng, 56 - soft, 3))
+            if octave_box:
+                box.note(t, d, pitch + 12, human(rng, 34, 2))
+            t += d
+
+    verses = 4
+    accomp(0, F, 0)                             # intro bar, ends with the pickup
+    melody(2, pickup, 0, False)
+    for v in range(verses):
+        soft = 8 if v == verses - 1 else 0
+        for i, notes in enumerate(mel_bars):
+            bar = 1 + v * 16 + i
+            accomp(bar, harmony[i], soft)
+            melody(bar * 3, notes, soft, v == 1)
+            if v in (1, 2) and i % 2 == 0:      # pad holds each two-bar harmony
+                bass, tones = harmony[i]
+                for n in tones:
+                    pad.note(bar * 3, 6 if harmony[i + 1] == harmony[i] else 3, n, human(rng, 32, 2))
+                if harmony[i + 1] != harmony[i]:
+                    for n in harmony[i + 1][1]:
+                        pad.note(bar * 3 + 3, 3, n, human(rng, 32, 2))
+            if i == 15 and v < verses - 1:
+                melody(bar * 3 + 2, pickup, soft, v == 1)
+    bars = 1 + verses * 16
+    return dict(title="Brahms Lullaby", beats_per_bar=3, total_beats=bars * 3,
+                tracks=[lh, rh, box, pad])
+
+
 PIECES = {
     "canon_ground": piece_canon,
     "slow_waltz": piece_gymno,
     "pentatonic_drift": piece_pentatonic,
     "moonlight": piece_moonlight,
+    "brahms_lullaby": piece_brahms,
 }
 
 

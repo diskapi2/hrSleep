@@ -8,7 +8,7 @@ Repo: github.com/diskapi2/hrSleep (this repo contains only hrSleep).
     https://diskapi2.github.io/hrSleep/hrSleep/ and used in Chrome on a Pixel 8 Pro.
   - music/*.mid + music/manifest.json: generated MIDI pieces, steady 60 bpm,
     quarter note = 1 beat, loopable (canon_ground 4/4, slow_waltz 3/4, pentatonic_drift 4/4,
-    moonlight 4/4).
+    moonlight 4/4, brahms_lullaby 3/4).
   - genMidi.py: generates the MIDI files with no dependencies (has its own SMF writer and a
     minimal Humdrum **kern reader). Args: --bpm, --seed, --out. It rewrites manifest.json,
     which index.html reads. Existing files regenerate byte-identically (seed = --seed + index),

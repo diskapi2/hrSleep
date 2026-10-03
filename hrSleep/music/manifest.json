@@ -26,5 +26,12 @@
     "bpm": 60.0,
     "beats_per_bar": 4,
     "beats": 276
+  },
+  {
+    "file": "brahms_lullaby.mid",
+    "title": "Brahms Lullaby",
+    "bpm": 60.0,
+    "beats_per_bar": 3,
+    "beats": 195
   }
 ]
