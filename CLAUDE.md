@@ -28,8 +28,8 @@ Example: X = 5, HR 70 → music at 65 bpm.
 - Heart rate input: Web Bluetooth, standard Heart Rate service 0x180D / heart_rate_measurement.
   Parses 8/16-bit HR and RR intervals (1/1024 s units), reads battery_service if present.
   Connecting (keepConnected/connectOnce): every step (gatt.connect, service/characteristic
-  discovery, startNotifications) has a 10 s timeout — on Android gatt.connect() can hang
-  forever — with a 0.6 s pause after connect, retries with backoff, one loop at a time
+  discovery) has a 10 s timeout — on Android gatt.connect() can hang
+  forever — with a 0.8 s pause after connect, retries, one loop at a time
   (bleSession cancels, bleBusy marks a running loop), and a single shared notification
   listener so reconnects never double the readings. A watchdog in the 1 Hz loop resets a
   link that is up but silent for 30 s; gattserverdisconnected then reconnects.
