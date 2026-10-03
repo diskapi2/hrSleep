@@ -167,6 +167,7 @@
     </div>
     <div class="row"><div id="logStatus" class="status"></div></div>
     <div class="row"><button id="btnEvents" class="grow">Show error log</button></div>
+    <div class="row"><div id="appVersion" class="status"></div></div>
   </section>
 
   <!-- Event / error log (connection steps, errors), for troubleshooting -->
@@ -205,7 +206,9 @@ for (const level of ["warn", "error"]) {
   const orig = console[level].bind(console);
   console[level] = (...args) => { orig(...args); logEvent(args.map(a => a instanceof Error ? errText(a) : typeof a === "object" ? JSON.stringify(a) : a).join(" "), level); };
 }
-logEvent("App loaded · " + navigator.userAgent);
+// Bump on every change, so the event log shows which version the phone actually ran.
+const APP_VERSION = "2026-10-03.2";
+logEvent(`App loaded · version ${APP_VERSION} · ${navigator.userAgent}`);
 
 // ---------------------------------------------------------------------------
 // Settings (persisted per browser)
@@ -817,6 +820,7 @@ $("btnClear").onclick = () => {
 window.addEventListener("pagehide", saveLog);
 
 if (!navigator.bluetooth) $("btnConnect").title = "Web Bluetooth needs Chrome over https:// or localhost";
+$("appVersion").textContent = "Version " + APP_VERSION;
 loadManifest();
 render();
 

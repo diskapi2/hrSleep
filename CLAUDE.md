@@ -48,6 +48,9 @@ Example: X = 5, HR 70 → music at 65 bpm.
   connects before, four failures right after). So dropDevice() unsubscribes
   (stopNotifications, best effort) before disconnecting, and pagehide calls it; pageshow
   from the back/forward cache reconnects.
+  The app cannot do what toggling sharing on the watch does: gatt.disconnect() only drops
+  Chrome's client (the Fitbit app keeps the physical link up, so a stuck ATT request stays
+  stuck), and Web Bluetooth blocks writing the CCCD descriptor directly.
   testing without a device.
 - Control loop, once per second: EMA-smoothed HR (tau, default 20 s) → target = clamp(HR − X,
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for
@@ -64,9 +67,12 @@ Example: X = 5, HR 70 → music at 65 bpm.
 - UI: dark night theme, readouts (HR / smoothed / music bpm), canvas chart, settings sliders
   saved in localStorage (defaults in DEFAULTS), screen Wake Lock while playing, "Dim" black
   overlay (double-tap to exit), fade-out timer.
+- APP_VERSION in index.html: bump on every change. It is logged with "App loaded" and shown
+  under the "Show error log" button, so logs from the phone show which version ran.
 - Offline cache: sw.js precaches index.html, music/* (from manifest.json), the two CDN
   libraries and the 18 Salamander samples. Own files are network-first (3 s timeout, then
-  cache), so pushed updates still arrive; CDN/samples are cache-first. Bump CACHE in sw.js
+  cache; fetched with cache: "no-cache" to skip GitHub Pages' 10-min HTTP caching), so pushed
+  updates arrive on the next load; CDN/samples are cache-first. Bump CACHE in sw.js
   only to force a full re-download (e.g. after changing the sample list).
 - Event/error log ("Show error log" button): logEvent() keeps the last 500 entries in
   localStorage (hrSleep.events) — every BLE step with timing, failures, disconnects, watchdog

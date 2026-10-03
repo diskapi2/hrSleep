@@ -3,7 +3,7 @@
 //  - This app's own files (index.html, music/*): network first so updates arrive,
 //    falling back to the cached copy when the network is slow or missing.
 //  - Libraries and piano samples (versioned, never change): cache first.
-const CACHE = "hrSleep-v1";
+const CACHE = "hrSleep-v1";   // bump only to force a full re-download
 const NETWORK_TIMEOUT_MS = 3000;
 
 const LIBS = [
@@ -48,7 +48,9 @@ async function cacheFirst(req) {
 
 async function networkFirst(req) {
   const cache = await caches.open(CACHE);
-  const network = fetch(req).then((res) => {
+  // no-cache: revalidate with the server instead of using the browser's HTTP cache
+  // (GitHub Pages allows 10 minutes), so a pushed update arrives on the next load.
+  const network = fetch(req.url, { cache: "no-cache", credentials: "same-origin" }).then((res) => {
     if (res.ok) cache.put(req, res.clone());
     return res;
   });
