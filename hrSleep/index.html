@@ -35,6 +35,7 @@
   button:active { background: #222228; }
   button.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
   button:disabled { opacity: .4; }
+  button.toggle.on { border-color: var(--accent); color: var(--accent); }
   select { flex: 1; min-width: 0; }
   .grow { flex: 1; }
   .status { color: var(--muted); font-size: 13px; }
@@ -118,9 +119,11 @@
     </div>
     <div class="row">
       <button id="btnPlay" class="primary grow">Play</button>
+      <button id="btnAdaptive" class="toggle" aria-pressed="false">Adaptive</button>
       <button id="btnDim">Dim</button>
     </div>
     <div class="row"><div id="playStatus" class="status"></div></div>
+    <div class="row"><div id="adaptStatus" class="status" hidden></div></div>
   </section>
 
   <!-- Settings -->
@@ -207,13 +210,13 @@ for (const level of ["warn", "error"]) {
   console[level] = (...args) => { orig(...args); logEvent(args.map(a => a instanceof Error ? errText(a) : typeof a === "object" ? JSON.stringify(a) : a).join(" "), level); };
 }
 // Bump on every change, so the event log shows which version the phone actually ran.
-const APP_VERSION = "2026-10-03.2";
+const APP_VERSION = "2026-10-03.3";
 logEvent(`App loaded · version ${APP_VERSION} · ${navigator.userAgent}`);
 
 // ---------------------------------------------------------------------------
 // Settings (persisted per browser)
 // ---------------------------------------------------------------------------
-const DEFAULTS = { offset: 5, volume: -12, timer: 45, tau: 20, rate: 6, minBpm: 45, maxBpm: 90, simHr: 72, piece: "" };
+const DEFAULTS = { offset: 5, volume: -12, timer: 45, tau: 20, rate: 6, minBpm: 45, maxBpm: 90, simHr: 72, piece: "", adaptive: false };
 const S = Object.assign({}, DEFAULTS, load("hrSleep.settings", {}));
 function load(key, dflt) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : dflt; } catch (e) { return dflt; } }
 function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { /* storage unavailable */ } }
@@ -592,6 +595,7 @@ async function play() {
     master.volume.value = S.volume;
     await startPiece();
     snapTempo = HR.smooth == null || !HR.lastAt || Date.now() - HR.lastAt > STALE_MS;
+    adaptReset();
     playing = true;
     playStartedAt = Date.now();
     armTimer();
@@ -642,6 +646,84 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Adaptive mode: when heart rate and music settle and HR stops coming down, raise the music
+// to the heart rate, stay in sync for a minute, lower it back to HR - X and stay low for two
+// minutes; repeat. All tempo changes go through the normal glide (S.rate bpm/min).
+//   follow: music at HR - X; watch for a plateau (no drop over PLATEAU_S)
+//   rise:   offset 0, music glides up to HR
+//   sync:   music at HR for SYNC_S
+//   lower:  offset X, music glides down to HR - X
+//   hold:   music at HR - X for LOW_S; then rise again if HR didn't drop, else follow
+// ---------------------------------------------------------------------------
+const ADAPT = { PLATEAU_S: 180, MIN_DROP: 1.0, SYNC_S: 60, LOW_S: 120, NEAR: 0.5, SETTLED: 1.0, GLIDE_MAX_S: 600 };
+const ADAPT_LABEL = { follow: "following", rise: "rising to heart rate", sync: "in sync with heart",
+  lower: "lowering", hold: "holding low" };
+const adapt = { phase: "follow", t: 0, hist: [] };   // t: seconds in phase; hist: smoothed HR, 1/s
+
+function adaptReset() { adaptGo("follow", true); }
+function adaptGo(phase, quiet) {
+  adapt.phase = phase; adapt.t = 0; adapt.hist = [];
+  if (!quiet) logEvent("Adaptive: " + ADAPT_LABEL[phase]);
+}
+function adaptOffset() { return adapt.phase === "rise" || adapt.phase === "sync" ? 0 : S.offset; }
+const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+// Heart rate dropped by less than MIN_DROP from the first to the last minute of hist
+const notDropping = (h) => mean(h.slice(0, 60)) - mean(h.slice(-60)) < ADAPT.MIN_DROP;
+
+// One step per second (music playing, fresh HR). Returns the offset to use.
+function adaptStep(sm, bpm) {
+  adapt.t++;
+  adapt.hist.push(sm);
+  if (adapt.hist.length > ADAPT.PLATEAU_S) adapt.hist.shift();
+  const low = clampBpm(sm - S.offset), high = clampBpm(sm);
+  switch (adapt.phase) {
+    case "follow":   // music has reached HR - X and HR hasn't dropped for PLATEAU_S
+      if (adapt.hist.length >= ADAPT.PLATEAU_S && Math.abs(bpm - low) < ADAPT.SETTLED && notDropping(adapt.hist))
+        adaptGo("rise");
+      break;
+    case "rise":
+      if (Math.abs(bpm - high) < ADAPT.NEAR || adapt.t >= ADAPT.GLIDE_MAX_S) adaptGo("sync");
+      break;
+    case "sync":
+      if (adapt.t >= ADAPT.SYNC_S) adaptGo("lower");
+      break;
+    case "lower":
+      if (Math.abs(bpm - low) < ADAPT.NEAR || adapt.t >= ADAPT.GLIDE_MAX_S) adaptGo("hold");
+      break;
+    case "hold":
+      if (adapt.t >= ADAPT.LOW_S) adaptGo(notDropping(adapt.hist) ? "rise" : "follow");
+      break;
+  }
+  return adaptOffset();
+}
+
+function renderAdapt() {
+  const el = $("adaptStatus");
+  el.hidden = !S.adaptive;
+  if (!S.adaptive) return;
+  const mmss = (sec) => Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+  let text = "Adaptive: " + ADAPT_LABEL[adapt.phase];
+  if (!playing) text = "Adaptive: starts when the music plays";
+  else if (adapt.phase === "follow") text += ` (music = HR − ${S.offset}; watching for a plateau, ${mmss(Math.min(adapt.hist.length, ADAPT.PLATEAU_S))} / ${mmss(ADAPT.PLATEAU_S)})`;
+  else if (adapt.phase === "sync") text += ` (${mmss(adapt.t)} / ${mmss(ADAPT.SYNC_S)})`;
+  else if (adapt.phase === "hold") text += ` (${mmss(adapt.t)} / ${mmss(ADAPT.LOW_S)})`;
+  el.textContent = text;
+}
+function setAdaptiveButton() {
+  $("btnAdaptive").classList.toggle("on", S.adaptive);
+  $("btnAdaptive").setAttribute("aria-pressed", String(S.adaptive));
+}
+$("btnAdaptive").onclick = () => {
+  S.adaptive = !S.adaptive;
+  save("hrSleep.settings", S);
+  adaptReset();
+  logEvent("Adaptive mode " + (S.adaptive ? "on" : "off"));
+  setAdaptiveButton();
+  renderAdapt();
+};
+setAdaptiveButton();
+
+// ---------------------------------------------------------------------------
 // Control loop (1 Hz): glide the music tempo toward smoothed HR - X
 // ---------------------------------------------------------------------------
 // The log is stored in chunks of LOG_CHUNK rows, and only unsaved chunks are rewritten,
@@ -687,7 +769,13 @@ setInterval(() => {
   const now = Date.now();
   const fresh = HR.lastAt && now - HR.lastAt < STALE_MS;
   bleWatchdog(now);
-  target = fresh && HR.smooth != null ? clampBpm(HR.smooth - S.offset) : null;
+  // Adaptive mode decides the offset (X, or 0 while matching the heart); phases only
+  // advance while music plays and heart rate is fresh.
+  let offsetNow = S.offset;
+  if (S.adaptive && playing && fresh && HR.smooth != null) offsetNow = adaptStep(HR.smooth, Transport.bpm.value);
+  else if (S.adaptive) offsetNow = adaptOffset();
+  target = fresh && HR.smooth != null ? clampBpm(HR.smooth - offsetNow) : null;
+  renderAdapt();
 
   if (bleBusy) { /* the connect loop shows its own status */ }
   else if (HR.source && HR.lastAt && !fresh) setHrStatus("No data for " + Math.round((now - HR.lastAt) / 1000) + " s — holding tempo", "stale");
@@ -711,6 +799,7 @@ setInterval(() => {
       tg: target != null ? +target.toFixed(1) : null,
       bpm: playing ? +Transport.bpm.value.toFixed(1) : null,
       src: HR.source, piece: playing && current ? current.item.file : "", x: S.offset,
+      xe: offsetNow, ph: S.adaptive ? adapt.phase : "",
     });
     if (log.length % 30 === 0) saveLog();
   }
@@ -801,10 +890,10 @@ $("btnEventsCopy").onclick = async () => {
 
 // --- CSV log ---
 $("btnCsv").onclick = () => {
-  const head = "time,elapsed_s,hr_bpm,rr_ms,hr_smooth,target_bpm,music_bpm,source,piece,offset_x";
+  const head = "time,elapsed_s,hr_bpm,rr_ms,hr_smooth,target_bpm,music_bpm,source,piece,offset_x,offset_used,adaptive_phase";
   const t0 = log.length ? log[0].t : 0;
   const lines = log.map(r => [new Date(r.t).toISOString(), ((r.t - t0) / 1000).toFixed(0), r.hr ?? "", r.rr,
-    r.sm ?? "", r.tg ?? "", r.bpm ?? "", r.src, r.piece, r.x].join(","));
+    r.sm ?? "", r.tg ?? "", r.bpm ?? "", r.src, r.piece, r.x, r.xe ?? r.x, r.ph ?? ""].join(","));
   const blob = new Blob([head + "\n" + lines.join("\n") + "\n"], { type: "text/csv" });
   const a = document.createElement("a");
   const d = new Date(t0 || Date.now());

@@ -51,11 +51,19 @@ Example: X = 5, HR 70 → music at 65 bpm.
   The app cannot do what toggling sharing on the watch does: gatt.disconnect() only drops
   Chrome's client (the Fitbit app keeps the physical link up, so a stuck ATT request stays
   stuck), and Web Bluetooth blocks writing the CCCD descriptor directly.
-  testing without a device.
+  A "Simulate" mode generates fake HR that drifts toward the music tempo, for testing
+  without a device.
 - Control loop, once per second: EMA-smoothed HR (tau, default 20 s) → target = clamp(HR − X,
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for
   10 s (STALE_MS), the tempo is held. If Play is pressed before any HR, the tempo jumps to the
   first target.
+- Adaptive mode ("Adaptive" toggle, S.adaptive; adaptStep() in the 1 Hz loop) only changes
+  the offset used: follow (HR − X) → when music has settled at HR − X and smoothed HR dropped
+  < 1 bpm between the first and last minute of the last 3 min → rise (offset 0, music glides
+  up to HR) → sync 60 s → lower (back to HR − X) → hold 120 s → rise again if HR didn't drop
+  during the hold, else follow. Glides use the normal rate limit; rise/lower give up after
+  10 min. Phases advance only while playing with fresh HR. Constants in ADAPT. Phase changes
+  go to the event log; the CSV has offset_used and adaptive_phase columns.
 - Audio: Tone.js 14.8.49 + @tonejs/midi 2.0.28 from jsDelivr. The app replaces Tone's context
   with one using latencyHint "playback" and lookAhead 0.5 s (against stalls/crackles on the
   phone). Tone.Transport / Tone.Draw / Tone.context stay bound to the discarded original
