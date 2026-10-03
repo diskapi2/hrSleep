@@ -268,7 +268,8 @@ function parseHrm(dv) {
 
 // Each step of connecting gets a timeout (on Android, gatt.connect() can hang forever),
 // failures retry with backoff, and only one connect loop runs at a time.
-const BLE_STEP_MS = 10000;      // timeout per step (connect, discovery, notifications)
+const BLE_STEP_MS = 10000;      // timeout per step (connect, discovery)
+const BLE_NOTIFY_MS = 6000;     // timeout for starting heart rate updates (works in < 0.5 s or never)
 const BLE_SILENT_MS = 30000;    // connected but no heart rate this long: reconnect
 let bleSession = 0;             // bumped to cancel a running connect loop
 let bleBusy = 0;                // session number of the running connect loop, 0 if none
@@ -306,42 +307,48 @@ async function connectBluetooth() {
     return;
   }
   stopSim();
-  const same = HR.device === device;   // chose the same watch again: keep its link
-  dropDevice(same);
-  logEvent(`BLE device chosen: ${device.name || "?"} (id ${device.id})${same ? " — same device, keeping the link" : ""}`);
+  const same = HR.device === device;
+  logEvent(`BLE device chosen: ${device.name || "?"} (id ${device.id})${same ? " — same device, starting fresh" : ""}`);
+  dropDevice();
+  // Chose the same watch again: its old link may hold a stuck request. Let the disconnect
+  // finish before connecting, or it cuts the new attempt's link.
+  if (same) await sleep(1500);
+  if (HR.device) return;    // another device was chosen meanwhile
   HR.device = device;
   device.addEventListener("gattserverdisconnected", onGattDisconnected);
   keepConnected(device, "Connecting to");
 }
 
-// Forget the current device and cancel any connect loop for it. keepLink: don't disconnect
-// (the same device was chosen again; disconnecting would cut the new attempt's link).
-function dropDevice(keepLink) {
+// Forget the current device and cancel any connect loop for it.
+function dropDevice() {
   const d = HR.device;
   if (!d) return;
   HR.device = null;
   bleSession++;
   d.removeEventListener("gattserverdisconnected", onGattDisconnected);
-  if (!keepLink && d.gatt.connected) d.gatt.disconnect();
+  if (d.gatt.connected) d.gatt.disconnect();
 }
 
 // Connect, retrying with backoff until it works or the device is dropped/replaced.
 async function keepConnected(device, label) {
   const session = ++bleSession;
   const name = device.name || "device";
+  const started = Date.now();
   bleBusy = session;
   try {
     for (let attempt = 1; HR.device === device && session === bleSession; attempt++) {
       setHrStatus(`${label} ${name}…` + (attempt > 1 ? ` (attempt ${attempt})` : ""), attempt > 1 ? "stale" : "");
       try {
         await connectOnce(device, session, attempt);
+        if (session === bleSession) logEvent(`BLE connected after ${attempt} attempt${attempt > 1 ? "s" : ""} (${Math.round((Date.now() - started) / 1000)} s)`);
         return;
       } catch (e) {
         if (session !== bleSession) return;
         logEvent(`BLE attempt ${attempt} failed: ${errText(e)} (link ${device.gatt.connected ? "up" : "down"})`, "error");
         if (device.gatt.connected) device.gatt.disconnect();   // reset a half-open link
         setHrStatus(`${e.message} — retrying…`, "stale");
-        await sleep(Math.min(15000, 1000 * attempt));
+        // A fresh connection is what succeeds, so retry quickly; slow down after many tries.
+        await sleep(attempt < 15 ? 1500 : 5000);
       }
     }
   } finally {
@@ -361,33 +368,28 @@ async function connectOnce(device, session, attempt) {
   };
   logEvent(`BLE attempt ${attempt} to ${name} (link ${device.gatt.connected ? "already up" : "down"})`);
   const server = await step("Connecting", device.gatt.connect());
-  // Android: discovering services right after connecting often fails; wait longer on retries
-  await sleep(attempt === 1 ? 600 : Math.min(3000, 1000 * attempt));
+  await sleep(800);   // Android: discovering services right after connecting often fails
   if (session !== bleSession) return;
   const svc = await step("Finding heart rate service", server.getPrimaryService("heart_rate"));
   const ch = await step("Finding heart rate data", svc.getCharacteristic("heart_rate_measurement"));
   ch.addEventListener("characteristicvaluechanged", onHrmChange);
-  // On Android, startNotifications() sometimes never resolves although readings do arrive
-  // (or the watch still notifies from an earlier connection), so the first reading counts
-  // as success too. It can also hang or fail while the phone's link to the watch is busy
-  // (e.g. the Fitbit app syncing), so retry it on the same link before reconnecting.
+  // On Android (Pixel + Charge 6), startNotifications() either succeeds in < 0.5 s or never
+  // answers — likely while the Fitbit app is using the shared link. Retrying on the same
+  // link only queues behind the stuck request, so one try per connection, then reconnect.
+  // Readings arriving without the promise resolving also count as success.
   const since = Date.now();
-  const firstReading = () => new Promise((resolve) => {
-    const iv = setInterval(() => { if (HR.lastAt >= since || session !== bleSession) { clearInterval(iv); resolve("reading"); } }, 200);
-    setTimeout(() => clearInterval(iv), BLE_STEP_MS + 1000);
+  const firstReading = new Promise((resolve) => {
+    const iv = setInterval(() => {
+      if (HR.lastAt >= since) { clearInterval(iv); resolve("reading"); }
+      else if (session !== bleSession) { clearInterval(iv); resolve("cancelled"); }
+    }, 200);
+    setTimeout(() => clearInterval(iv), BLE_NOTIFY_MS + 1000);
   });
-  let how = null;
-  for (let n = 1; !how; n++) {
-    try {
-      how = await step("Starting heart rate updates" + (n > 1 ? ` (try ${n})` : ""),
-        Promise.race([ch.startNotifications().then(() => "confirmed"), firstReading()]));
-    } catch (e) {
-      if (n >= 3 || !device.gatt.connected || session !== bleSession) throw e;
-      logEvent(`BLE ${errText(e)} — trying again on the same link`, "warn");
-      await sleep(1500);
-      t0 = Date.now();
-    }
-  }
+  logEvent("BLE Starting heart rate updates…");
+  const how = await withTimeout(Promise.race([ch.startNotifications().then(() => "confirmed"), firstReading]),
+    BLE_NOTIFY_MS, "Starting heart rate updates");
+  if (how === "cancelled") return;
+  logEvent(`BLE Starting heart rate updates ok (${Date.now() - since} ms)`);
   if (how === "reading") logEvent("BLE startNotifications not confirmed, but readings arrive — continuing", "warn");
   if (session !== bleSession) return;
   HR.source = "ble:" + name;

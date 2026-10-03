@@ -33,12 +33,14 @@ Example: X = 5, HR 70 → music at 65 bpm.
   (bleSession cancels, bleBusy marks a running loop), and a single shared notification
   listener so reconnects never double the readings. A watchdog in the 1 Hz loop resets a
   link that is up but silent for 30 s; gattserverdisconnected then reconnects.
-  On Android startNotifications() sometimes never resolves (seen with the Charge 6), so the
-  first reading after it is called also counts as success; the pause after connect grows on
-  retries (0.6 s, then 2–3 s). It also hangs or fails with "NotSupportedError: GATT operation
-  failed for unknown reason" (seen on the Pixel, likely the Fitbit app syncing over the shared
-  link), so it is retried up to 3 times on the same link before a full reconnect. Choosing
-  the same device again keeps its link (disconnecting it used to kill the new attempt). A "Simulate" mode generates fake HR that drifts toward the music tempo, for
+  Pixel 8 Pro + Charge 6 (from the in-app event log): the link is already up (Fitbit app),
+  connect takes 10–60 ms, and startNotifications() either succeeds in < 0.5 s or never
+  answers / fails with NotSupportedError; retrying on the same link only queues behind the
+  stuck request, and a fresh connection is what succeeds. So: one startNotifications per
+  connection with a 6 s timeout (BLE_NOTIFY_MS), then disconnect and retry after 1.5 s
+  (5 s after 15 attempts). A reading that arrives without the promise resolving counts as
+  success. Choosing the same device again disconnects it and waits 1.5 s before connecting
+  (an immediate connect got cut by the pending disconnect).
   testing without a device.
 - Control loop, once per second: EMA-smoothed HR (tau, default 20 s) → target = clamp(HR − X,
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for
