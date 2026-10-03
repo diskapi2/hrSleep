@@ -4,7 +4,7 @@ Repo: github.com/diskapi2/hrSleep (this repo contains only hrSleep).
 
 ## Repo layout
 - hrSleep/ — sleep aid web app: music whose tempo follows the user's heart rate.
-  - index.html: single-file web app (no build step). It is published on GitHub Pages at
+  - index.html: single-file web app (no build step), plus sw.js (service worker). It is published on GitHub Pages at
     https://diskapi2.github.io/hrSleep/hrSleep/ and used in Chrome on a Pixel 8 Pro.
   - music/*.mid + music/manifest.json: generated MIDI pieces, steady 60 bpm,
     quarter note = 1 beat, loopable (canon_ground 4/4, slow_waltz 3/4, pentatonic_drift 4/4,
@@ -33,14 +33,25 @@ Example: X = 5, HR 70 → music at 65 bpm.
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for
   10 s (STALE_MS), the tempo is held. If Play is pressed before any HR, the tempo jumps to the
   first target.
-- Audio: Tone.js 14.8.49 + @tonejs/midi 2.0.28 from jsDelivr. MIDI is scheduled in ticks
+- Audio: Tone.js 14.8.49 + @tonejs/midi 2.0.28 from jsDelivr. The app replaces Tone's context
+  with one using latencyHint "playback" and lookAhead 0.5 s (against stalls/crackles on the
+  phone). Tone.Transport / Tone.Draw / Tone.context stay bound to the discarded original
+  context, so the code uses `Transport` / `Draw` (from Tone.getTransport()/getDraw()) and
+  Tone.getContext() — never the Tone.* aliases. MIDI is scheduled in ticks
   (Transport.PPQ = file PPQ), so changing Transport.bpm retimes playback with no pitch
   artifacts. Piano/harp tracks use the Salamander piano Sampler (falls back to a synth when
   offline); strings/pad General MIDI programs (40–55, 88–95) use a soft PolySynth. Reverb on all.
 - UI: dark night theme, readouts (HR / smoothed / music bpm), canvas chart, settings sliders
   saved in localStorage (defaults in DEFAULTS), screen Wake Lock while playing, "Dim" black
   overlay (double-tap to exit), fade-out timer.
-- Log: 1 row/s, kept in localStorage, downloadable as CSV with columns
+- Offline cache: sw.js precaches index.html, music/* (from manifest.json), the two CDN
+  libraries and the 18 Salamander samples. Own files are network-first (3 s timeout, then
+  cache), so pushed updates still arrive; CDN/samples are cache-first. Bump CACHE in sw.js
+  only to force a full re-download (e.g. after changing the sample list).
+- Log: 1 row/s, kept in localStorage in chunks of 300 rows (keys hrSleep.log.0..n-1 and
+  hrSleep.log.chunks; only unsaved chunks are rewritten, every 30 s and on pagehide; an old
+  single-key hrSleep.log is migrated on load). The chart draws only when visible, binary-
+  searches the start row and decimates to ~2 points per pixel. Downloadable as CSV with columns
   time, elapsed_s, hr_bpm, rr_ms, hr_smooth, target_bpm, music_bpm, source, piece, offset_x.
 
 ## Constraints

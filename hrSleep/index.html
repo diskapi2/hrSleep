@@ -295,7 +295,7 @@ function startSim() {
   simTimer = setInterval(() => {
     // drift toward the resting HR, pulled toward the music tempo while it plays
     let goal = S.simHr;
-    if (playing) goal += 0.35 * (Tone.Transport.bpm.value - S.simHr);
+    if (playing) goal += 0.35 * (Transport.bpm.value - S.simHr);
     simHr += (goal - simHr) * 0.04 + gauss() * 0.8;
     const bpm = Math.round(simHr + (Math.random() < 0.01 ? (Math.random() - 0.5) * 30 : 0));
     onHeartRate(bpm, [Math.round(60000 / simHr + gauss() * 25)]);
@@ -316,6 +316,13 @@ $("btnSim").onclick = () => simTimer ? stopSim() : startSim();
 // ---------------------------------------------------------------------------
 // Music: MIDI pieces played with Tone.js, tempo set from the heart rate
 // ---------------------------------------------------------------------------
+// Against stalls and crackles: "playback" asks for a larger audio output buffer, and a
+// 0.5 s scheduling margin (Tone's default is 0.1 s) keeps notes on time when the main
+// thread is busy or the phone throttles a screen-off page. Tempo changes are slow anyway.
+Tone.setContext(new Tone.Context({ latencyHint: "playback", lookAhead: 0.5 }), true);
+// Tone.Transport / Tone.Draw stay bound to the original context, so use the new context's.
+const Transport = Tone.getTransport(), Draw = Tone.getDraw();
+
 let manifest = [], master = null, reverb = null, piano = null, pad = null, parts = [], playing = false;
 let current = null;   // { item, midi, loopTicks }
 
@@ -363,8 +370,8 @@ async function initAudio() {
 }
 
 function scheduleBeatIndicator() {
-  Tone.Transport.scheduleRepeat((time) => {
-    Tone.Draw.schedule(() => { const b = $("beat"); b.classList.add("on"); setTimeout(() => b.classList.remove("on"), 120); }, time);
+  Transport.scheduleRepeat((time) => {
+    Draw.schedule(() => { const b = $("beat"); b.classList.add("on"); setTimeout(() => b.classList.remove("on"), 120); }, time);
   }, "4n");
 }
 
@@ -378,12 +385,12 @@ async function startPiece() {
   const item = manifest.find(m => m.file === $("piece").value) || manifest[0];
   if (!item) return;
   const midi = await Midi.fromUrl("music/" + item.file);
-  Tone.Transport.stop();
-  Tone.Transport.cancel(0);
+  Transport.stop();
+  Transport.cancel(0);
   parts.forEach(p => p.dispose());
   parts = [];
 
-  Tone.Transport.PPQ = midi.header.ppq;
+  Transport.PPQ = midi.header.ppq;
   scheduleBeatIndicator();
   const loopTicks = item.beats ? item.beats * midi.header.ppq : midi.durationTicks;
   for (const track of midi.tracks) {
@@ -399,8 +406,8 @@ async function startPiece() {
     parts.push(part);
   }
   current = { item, midi, loopTicks };
-  if (!playing) Tone.Transport.bpm.value = clampBpm(HR.smooth != null ? HR.smooth - S.offset : item.bpm);
-  Tone.Transport.start("+0.1");
+  if (!playing) Transport.bpm.value = clampBpm(HR.smooth != null ? HR.smooth - S.offset : item.bpm);
+  Transport.start("+0.1");
   $("playStatus").textContent = `Playing “${item.title}” (native ${item.bpm} bpm)`;
 }
 
@@ -426,7 +433,7 @@ async function play() {
 
 function stop() {
   playing = false;
-  Tone.Transport.stop();
+  Transport.stop();
   parts.forEach(p => p.dispose());
   parts = [];
   clearTimeout(fadeTimer);
@@ -457,13 +464,51 @@ async function requestWakeLock() {
   try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { /* not granted */ }
 }
 function releaseWakeLock() { if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; } }
-document.addEventListener("visibilitychange", () => { if (playing && document.visibilityState === "visible") requestWakeLock(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (playing) requestWakeLock();
+  drawChart();
+});
 
 // ---------------------------------------------------------------------------
 // Control loop (1 Hz): glide the music tempo toward smoothed HR - X
 // ---------------------------------------------------------------------------
-const LOG_KEY = "hrSleep.log";
-let log = load(LOG_KEY, []);
+// The log is stored in chunks of LOG_CHUNK rows, and only unsaved chunks are rewritten,
+// so saving stays cheap however long the log gets.
+const LOG_KEY = "hrSleep.log", LOG_CHUNK = 300;
+let log = [], logSaved = 0, logSaveFailed = false;   // logSaved: rows in complete, saved chunks
+function loadLog() {
+  const n = load(LOG_KEY + ".chunks", 0);
+  for (let i = 0; i < n; i++) log = log.concat(load(LOG_KEY + "." + i, []));
+  logSaved = Math.floor(log.length / LOG_CHUNK) * LOG_CHUNK;
+  const old = load(LOG_KEY, null);                // single-key format used before chunking
+  if (old && old.length) {
+    log = old.concat(log);
+    logSaved = 0;
+    if (saveLog()) localStorage.removeItem(LOG_KEY);
+  }
+}
+function saveLog() {
+  try {
+    const n = Math.ceil(log.length / LOG_CHUNK);
+    for (let i = logSaved / LOG_CHUNK; i < n; i++)
+      localStorage.setItem(LOG_KEY + "." + i, JSON.stringify(log.slice(i * LOG_CHUNK, (i + 1) * LOG_CHUNK)));
+    localStorage.setItem(LOG_KEY + ".chunks", JSON.stringify(n));
+    logSaved = Math.floor(log.length / LOG_CHUNK) * LOG_CHUNK;
+    logSaveFailed = false;
+    return true;
+  } catch (e) { logSaveFailed = true; return false; }   // storage full or unavailable
+}
+function clearLog() {
+  try {
+    const n = load(LOG_KEY + ".chunks", 0);
+    for (let i = 0; i < n; i++) localStorage.removeItem(LOG_KEY + "." + i);
+    localStorage.removeItem(LOG_KEY + ".chunks");
+    localStorage.removeItem(LOG_KEY);
+  } catch (e) { /* storage unavailable */ }
+  log = []; logSaved = 0; logSaveFailed = false;
+}
+loadLog();
 let target = null;
 let snapTempo = false;   // jump straight to the first target after Play when no HR was available yet
 
@@ -477,13 +522,13 @@ setInterval(() => {
     setHrStatus("Connected: " + HR.source.slice(4), "on");
 
   if (playing && target != null && snapTempo) {
-    Tone.Transport.bpm.rampTo(target, 2);
+    Transport.bpm.rampTo(target, 2);
     snapTempo = false;
   } else if (playing && target != null) {
-    const cur = Tone.Transport.bpm.value;
+    const cur = Transport.bpm.value;
     const maxStep = S.rate / 60;                     // bpm per second
     const next = cur + Math.max(-maxStep, Math.min(maxStep, target - cur));
-    Tone.Transport.bpm.rampTo(next, 1);
+    Transport.bpm.rampTo(next, 1);
   }
 
   if (HR.source) {
@@ -491,10 +536,10 @@ setInterval(() => {
       t: now, hr: fresh ? HR.last : null, rr: HR.rrPending.splice(0).join(";"),
       sm: fresh && HR.smooth != null ? +HR.smooth.toFixed(1) : null,
       tg: target != null ? +target.toFixed(1) : null,
-      bpm: playing ? +Tone.Transport.bpm.value.toFixed(1) : null,
+      bpm: playing ? +Transport.bpm.value.toFixed(1) : null,
       src: HR.source, piece: playing && current ? current.item.file : "", x: S.offset,
     });
-    if (log.length % 30 === 0) save(LOG_KEY, log);
+    if (log.length % 30 === 0) saveLog();
   }
   render();
 }, 1000);
@@ -504,15 +549,16 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 function render() {
   const fresh = HR.lastAt && Date.now() - HR.lastAt < STALE_MS;
-  const bpm = playing ? Tone.Transport.bpm.value : null;
+  const bpm = playing ? Transport.bpm.value : null;
   $("vHr").textContent = fresh ? HR.last : "--";
   $("vSmooth").textContent = fresh && HR.smooth != null ? HR.smooth.toFixed(0) : "--";
   $("vBpm").textContent = bpm != null ? bpm.toFixed(1) : "--";
   $("dimHr").textContent = fresh ? HR.last : "--";
   $("dimInfo").textContent = bpm != null ? "music " + bpm.toFixed(0) + " bpm" : "";
   const mins = log.length ? ((log[log.length - 1].t - log[0].t) / 60000).toFixed(0) : 0;
-  $("logStatus").textContent = `${log.length} rows logged (${mins} min)` + (HR.battery != null ? ` · device battery ${HR.battery}%` : "");
-  drawChart();
+  $("logStatus").textContent = `${log.length} rows logged (${mins} min)` + (HR.battery != null ? ` · device battery ${HR.battery}%` : "")
+    + (logSaveFailed ? " · storage full: download and clear the log" : "");
+  if (!document.hidden && !$("dim").classList.contains("show")) drawChart();  // skip while not visible
 }
 
 function drawChart() {
@@ -527,10 +573,15 @@ function drawChart() {
   const tEnd = Date.now();
   const first = log.length ? log[0].t : tEnd - 60000;
   const tStart = Math.min(tEnd - 60000, span ? Math.max(tEnd - span, first) : first);
-  const rows = log.filter(r => r.t >= tStart);
-  const vals = rows.flatMap(r => [r.hr, r.sm, r.bpm]).filter(v => v != null);
-  if (!vals.length) { g.fillStyle = "#77736b"; g.font = "13px system-ui"; g.fillText("No data yet", 8, h / 2); return; }
-  let lo = Math.floor((Math.min(...vals) - 3) / 5) * 5, hi = Math.ceil((Math.max(...vals) + 3) / 5) * 5;
+  let a = 0, b = log.length;                      // binary search: first row at or after tStart
+  while (a < b) { const m = (a + b) >> 1; if (log[m].t < tStart) a = m + 1; else b = m; }
+  const step = Math.max(1, Math.floor((log.length - a) / (2 * w)));   // at most ~2 points per pixel
+  const rows = [];
+  for (let i = a; i < log.length; i += step) rows.push(log[i]);
+  let vmin = Infinity, vmax = -Infinity;
+  for (const r of rows) for (const v of [r.hr, r.sm, r.bpm]) if (v != null) { if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+  if (vmin === Infinity) { g.fillStyle = "#77736b"; g.font = "13px system-ui"; g.fillText("No data yet", 8, h / 2); return; }
+  let lo = Math.floor((vmin - 3) / 5) * 5, hi = Math.ceil((vmax + 3) / 5) * 5;
   const padL = 28, x = t => padL + (t - tStart) / (tEnd - tStart) * (w - padL - 4), y = v => 4 + (hi - v) / (hi - lo) * (h - 20);
 
   g.strokeStyle = "#1c1c21"; g.fillStyle = "#77736b"; g.font = "11px system-ui"; g.lineWidth = 1;
@@ -556,7 +607,7 @@ window.addEventListener("resize", drawChart);
 
 // --- Dim screen (keeps the page alive for audio + Bluetooth) ---
 $("btnDim").onclick = () => $("dim").classList.add("show");
-$("dim").ondblclick = () => $("dim").classList.remove("show");
+$("dim").ondblclick = () => { $("dim").classList.remove("show"); drawChart(); };
 
 // --- CSV log ---
 $("btnCsv").onclick = () => {
@@ -574,13 +625,17 @@ $("btnCsv").onclick = () => {
 };
 $("btnClear").onclick = () => {
   if (!confirm("Clear the recorded log?")) return;
-  log = []; save(LOG_KEY, log); render();
+  clearLog(); render();
 };
-window.addEventListener("pagehide", () => save(LOG_KEY, log));
+window.addEventListener("pagehide", saveLog);
 
 if (!navigator.bluetooth) $("btnConnect").title = "Web Bluetooth needs Chrome over https:// or localhost";
 loadManifest();
 render();
+
+// Cache the app, libraries, piano samples and music on the phone (see sw.js),
+// so playback doesn't depend on the network.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
 </body>
 </html>
