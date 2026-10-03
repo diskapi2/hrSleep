@@ -330,6 +330,9 @@ function dropDevice() {
   HR.device = null;
   bleSession++;
   d.removeEventListener("gattserverdisconnected", onGattDisconnected);
+  // Unsubscribe first (best effort), so the watch doesn't keep a stale subscription.
+  if (HR.ch && d.gatt.connected) { try { HR.ch.stopNotifications().catch(() => {}); } catch (e) { /* ignore */ } }
+  HR.ch = null;
   if (d.gatt.connected) d.gatt.disconnect();
 }
 
@@ -379,6 +382,7 @@ async function connectOnce(device, session, attempt) {
   const svc = await step("Finding heart rate service", server.getPrimaryService("heart_rate"));
   const ch = await step("Finding heart rate data", svc.getCharacteristic("heart_rate_measurement"));
   ch.addEventListener("characteristicvaluechanged", onHrmChange);
+  HR.ch = ch;
   // On Android (Pixel + Charge 6), startNotifications() either succeeds in < 0.5 s or never
   // answers — likely while the Fitbit app is using the shared link. Retrying on the same
   // link only queues behind the stuck request, so one try per connection, then reconnect.
@@ -404,6 +408,26 @@ async function connectOnce(device, session, attempt) {
   logEvent("BLE connected: " + name);
   readBattery(server);
 }
+
+// Close the link properly when the page goes away (reload, closing the tab). Otherwise
+// the watch keeps the old page's heart rate subscription, and the next page's request
+// to start updates hangs until heart rate sharing is toggled on the watch.
+let bleSuspended = null;   // device to reconnect if the page comes back from the back/forward cache
+window.addEventListener("pagehide", () => {
+  const d = HR.device;
+  if (!d) return;
+  logEvent("BLE page closing — unsubscribing and disconnecting");
+  dropDevice();
+  bleSuspended = d;
+});
+window.addEventListener("pageshow", (ev) => {
+  const d = bleSuspended;
+  bleSuspended = null;
+  if (!ev.persisted || !d || HR.device) return;
+  HR.device = d;
+  d.addEventListener("gattserverdisconnected", onGattDisconnected);
+  keepConnected(d, "Reconnecting to");
+});
 
 // Called from the 1 Hz loop: a link that is up but silent gets reset (the
 // gattserverdisconnected handler then reconnects).

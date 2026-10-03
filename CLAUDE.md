@@ -44,6 +44,10 @@ Example: X = 5, HR 70 → music at 65 bpm.
   Root cause is on the watch: turning the Charge 6's "HR on equipment" (heart rate sharing)
   off and on made it connect immediately. After 2 failed attempts the status line shows
   that tip (BLE_TIP_AFTER / BLE_TIP).
+  Event log 20:10 showed what leaves it stuck: a page reload while connected (first-try
+  connects before, four failures right after). So dropDevice() unsubscribes
+  (stopNotifications, best effort) before disconnecting, and pagehide calls it; pageshow
+  from the back/forward cache reconnects.
   testing without a device.
 - Control loop, once per second: EMA-smoothed HR (tau, default 20 s) → target = clamp(HR − X,
   min 45, max 90) → tempo glides toward the target, limited to 6 bpm/min. If no HR arrives for
