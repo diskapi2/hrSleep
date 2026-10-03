@@ -69,7 +69,8 @@ Example: X = 5, HR 70 → music at 65 bpm.
 ## Status / open items
 - Verified with the simulator: tempo follows HR (measured playback rate matches the set bpm),
   piece switching, dim mode, CSV log, layout at phone width.
-- Not yet verified: a real Bluetooth connection to the Charge 6 (it may only share heart rate
-  during an exercise session) or to the chest strap.
+- Verified on the phone: Bluetooth connection to the Charge 6 (heart rate sharing during an
+  exercise session) works, and is reliable since the timeout/retry rewrite.
+- Not yet verified: the chest strap.
 - Possible next steps: an hrSleep analysis script (does HR follow the music? reads the app's
   CSV log), more or longer MIDI pieces, and a stepped tempo mode.
